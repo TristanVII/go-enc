@@ -1,12 +1,13 @@
 package main
 
 import (
-	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-
 	"golang.org/x/crypto/nacl/secretbox"
 )
 
@@ -20,8 +21,18 @@ var (
 	ErrDecrypt = errors.New("secret: decryption failed")
 )
 
+type NaclEcryption struct {
+	key *[KeySize]byte
+}
+
+// AES-GCM
+type AESGCM struct {
+	// The key length is 16 bytes for AES-128, 24 bytes for AES-192, or 32 bytes for AES-256
+	key *[KeySize]byte
+}
+
 // GenerateKey creates a new random secret key
-func generateKey() (*[KeySize]byte, error) {
+func generateKeyHelper() (*[KeySize]byte, error) {
 	key := new([KeySize]byte)
 
 	_, err := io.ReadFull(rand.Reader, key[:])
@@ -32,9 +43,8 @@ func generateKey() (*[KeySize]byte, error) {
 	return key, nil
 
 }
-
 // create a random nonce
-func generateNonce() (*[NonceSize]byte, error) {
+func GenerateNonceHelper() (*[NonceSize]byte, error) {
 
 	nonce := new([NonceSize]byte)
 
@@ -46,55 +56,82 @@ func generateNonce() (*[NonceSize]byte, error) {
 	return nonce, nil
 }
 
-func encrypt(key *[KeySize]byte, message []byte) ([]byte, error) {
-	nonce, err := generateNonce()
+// NACl encryption using "salt"
+// NewNaclEncryption initializes a new instance of NaclEncryption with a generated key
+func NewNaclEncryption(keyArg *[KeySize]byte) (*NaclEcryption, error) {
+	key := keyArg
+	if keyArg == nil {
+		res, err := generateKeyHelper()
+		if err != nil {
+			return nil, err
+		}
+		key = res
+	}
+	return &NaclEcryption{key: key}, nil
+}
+
+
+func (n NaclEcryption) Encrypt(message []byte) ([]byte, error) {
+	nonce, err := GenerateNonceHelper()
 	if err != nil {
 		return nil, ErrEncrypt
 	}
 
 	out := make([]byte, len(nonce))
 	copy(out, nonce[:])
-	out = secretbox.Seal(out, message, nonce, key)
+	out = secretbox.Seal(out, message, nonce, n.key)
 	return out, nil
-	
+
 }
 
 // decrypt expects the encrypted message with the nonce
-func decrypt(key *[KeySize]byte, message []byte) ([]byte, error) {
+func (n NaclEcryption) Decrypt(message []byte) ([]byte, error) {
 	if len(message) < (NonceSize + secretbox.Overhead) {
 		return nil, ErrDecrypt
 	}
 	var nonce [NonceSize]byte
 	copy(nonce[:], message[:NonceSize])
-	out, ok := secretbox.Open(nil, message[NonceSize:], &nonce, key)
+	out, ok := secretbox.Open(nil, message[NonceSize:], &nonce, n.key)
 	if !ok {
 		return nil, ErrDecrypt
 	}
 	return out, nil
 }
 
+// Basic AES encryption without additional data 
+func (a AESGCM) Encrypt(message []byte, additionalData []byte) ([]byte, error) {
+	c, err := aes.NewCipher(a.key[:])
+	if err != nil {
+		return nil, ErrEncrypt
+	}
+	gcm, err := cipher.NewGCM(c)
+	if err != nil {
+		return nil, ErrEncrypt
+	}
+	nonce, err := GenerateNonceHelper()
+	if err != nil {
+		return nil, ErrEncrypt
+	}
+	// additionalData can be nil
+	out := gcm.Seal(nonce[:], nonce[:], message, additionalData)
+	return out, nil
+}
+
+
+func (a AESGCM) EncryptWithID(message []byte, sender uint32) ([]byte, error) {
+	bufferForId := make([]byte, 4)
+	binary.BigEndian.PutUint32(bufferForId, sender)
+	return a.Encrypt(message, bufferForId)
+
+}
 
 func main() {
-	message := []byte("Test123")
-	key, err := generateKey()
-	if err != nil {
-		fmt.Println("Failed to generate key")
-		return
-	}
-	encryptedMessage, err := encrypt(key, message)
-	if err != nil {
-		fmt.Println("Failed to encrypt")
-		return
-	}
-	fmt.Printf("encryptedMessage: %s\n", string(encryptedMessage))
-	decryptedMessage, err := decrypt(key, encryptedMessage)
-	if err != nil {
-		fmt.Println("Failed to decrypt")
-		return
-	}
-	fmt.Printf("decryptedMessage: %s\n", string(decryptedMessage))
-	if !bytes.Equal(message, decryptedMessage) {
-		fmt.Println("Encrypted message and decrypted message do not match")
-		return
-	}
+	// naclEncryption, _ := NewNaclEncryption(nil)
+	// message := []byte("TestMessage123!")
+	// encryptedMessage, _ := naclEncryption.Encrypt(message)
+	// decryptedMessage, _ := naclEncryption.Decrypt(encryptedMessage)
+	// fmt.Printf("Original Message: %s\nEncrypted Message: %s\nDecrypted Message: %s", string(message), string(encryptedMessage), string(decryptedMessage))
+	Test1()
+	Test2()
+	Test3()
 }
